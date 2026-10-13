@@ -1,0 +1,86 @@
+# 云端编译未签名 IPA：把 closer-app.zip 传到仓库根目录就会自动运行
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "closer-app.zip"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unpack project
+        run: |
+          set -e
+          test -f closer-app.zip || { echo "closer-app.zip not found in repo root"; exit 1; }
+          rm -rf app
+          mkdir app
+          unzip -q closer-app.zip -d app
+          ls -la app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: app
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        working-directory: app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Closer.xcodeproj \
+            -scheme Closer \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: Package IPA
+        working-directory: app
+        run: |
+          set -e
+          APP_PATH=$(find build/Build/Products -maxdepth 2 -name "*.app" | head -n 1)
+          echo "App: $APP_PATH"
+          rm -rf Payload Closer.ipa
+          mkdir Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry Closer.ipa Payload
+          ls -la Closer.ipa
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: app/build.log
+          if-no-files-found: ignore
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Closer-unsigned-ipa
+          path: app/Closer.ipa
+
+      - name: Create release with IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" app/Closer.ipa \
+            --repo "${{ github.repository }}" \
+            --title "Build ${{ github.run_number }}" \
+            --notes "Unsigned IPA. Import it into your signing app and sign with your own certificate."
